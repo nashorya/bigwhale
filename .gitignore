@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+**/venv/
+**/.venv/
+
+# Environment Variables
+.env
+*.env
+!.env.example
+!env.example
+
+# IDEs and Editors
+.vscode/
+.idea/
+.claude/
+.cursor/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+
+# SQLite Databases & logs
+*.db
+*.sqlite
+*.sqlite3
+data/kaoyan.db
+data/logs/
+data/debug_monthly_raw.txt
+
+# CSV Files (runtime exports)
+*.csv
+
+# LLM Outputs & Tests
+output_*/
+output_test/
+zhipu_result.txt
+
+# Temp/Misc Files
+微信图片_20260318191934_206_23.jpg
+*.log

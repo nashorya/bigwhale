@@ -1,0 +1,12 @@
+nonebot2
+nonebot-adapter-onebot
+aiosqlite
+apscheduler
+python-dotenv
+ruff
+google-genai
+aiohttp
+beautifulsoup4
+tavily-python
+httpx
+openai

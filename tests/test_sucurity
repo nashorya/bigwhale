@@ -1,0 +1,30 @@
+import os
+os.environ["SHORE_USER_SALT"] = "test_salt_for_unit_test_only"
+
+from plugins.shore.core.security import hash_user_id, get_or_create_uid, sanitize_input
+
+def test_hash_consistency():
+    assert hash_user_id("123456") == hash_user_id("123456")
+
+def test_hash_isolation():
+    assert hash_user_id("123456") != hash_user_id("789012")
+
+def test_hash_no_raw_qq():
+    assert "123456" not in hash_user_id("123456")
+
+def test_sanitize_length():
+    assert len(sanitize_input("a" * 200)) <= 100
+
+def test_sanitize_control_chars():
+    assert sanitize_input("hello\x00world") == "helloworld"
+
+def test_sanitize_strip():
+    assert sanitize_input("  hello  ") == "hello"
+
+def test_get_or_create_uid_consistent():
+    uid1 = get_or_create_uid("999888")
+    uid2 = get_or_create_uid("999888")
+    assert uid1 == uid2
+
+def test_get_or_create_uid_isolation():
+    assert get_or_create_uid("111") != get_or_create_uid("222")

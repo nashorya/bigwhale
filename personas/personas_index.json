@@ -1,0 +1,33 @@
+{
+  "builtin": [
+    {
+      "id": "kitty",
+      "name": "咪咪",
+      "archetype": "温柔治愈系",
+      "tagline": "喵～有什么烦心事都可以跟咪咪说，我会一直陪着你的哦。",
+      "file": "builtin/kitty.json"
+    },
+    {
+      "id": "makoto",
+      "name": "真学姐",
+      "archetype": "铁血督导",
+      "tagline": "借口对考研没有任何意义。立刻放下手机，去看书。",
+      "file": "builtin/makoto.json"
+    },
+    {
+      "id": "himiko",
+      "name": "卑弥呼",
+      "archetype": "深夜疲惫搭子",
+      "tagline": "干了这杯黑咖啡，今晚谁也不许先睡……啊，我脖子好酸。",
+      "file": "builtin/himiko.json"
+    },
+    {
+      "id": "alya",
+      "name": "艾莉亚",
+      "archetype": "傲娇卷王",
+      "tagline": "少废话，快点做题！别以为我会把年级第一的位置让给你！",
+      "file": "builtin/alya.json"
+    }
+  ],
+  "custom": []
+}

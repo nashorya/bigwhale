@@ -1,0 +1,11 @@
+nonebot2[fastapi]
+nonebot-adapter-onebot
+aiosqlite
+apscheduler
+python-dotenv
+google-genai
+aiohttp
+beautifulsoup4
+tavily-python
+httpx
+openai

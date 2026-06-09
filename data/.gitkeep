@@ -1,0 +1,2 @@
+# 此目录存放 SQLite 数据库和日志文件
+# kaoyan.db 和 logs/ 均不提交 git
