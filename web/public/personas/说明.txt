@@ -1,0 +1,1 @@
+把四张角色立绘存到这里，文件名：kitty.png / makoto.png / himiko.png / alya.png

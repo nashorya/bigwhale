@@ -20,3 +20,4 @@ from .handlers import help as _help_handler  # noqa: F401
 from .handlers import weekly_plan as _weekly_plan_handler  # noqa: F401
 from .handlers import study_plan as _study_plan_handler  # noqa: F401
 from .handlers import word_push as _word_push_handler  # noqa: F401
+from .handlers import web_api as _web_api_handler  # noqa: F401

@@ -12,14 +12,18 @@ from __future__ import annotations
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime
+from pathlib import Path
 from typing import AsyncGenerator
 
 import aiosqlite
+
+from .security import generate_invite_code
 
 
 # ──────────────────────────────────────────────
 # 数据库连接管理
 # ──────────────────────────────────────────────
+
 
 @asynccontextmanager
 async def get_db_conn() -> AsyncGenerator[aiosqlite.Connection, None]:
@@ -50,6 +54,7 @@ async def get_db_conn() -> AsyncGenerator[aiosqlite.Connection, None]:
 # UserDB 封装类
 # ──────────────────────────────────────────────
 
+
 class UserDB:
     """
     绑定 user_id 的数据库操作类。
@@ -63,8 +68,100 @@ class UserDB:
         self._uid = user_id
         self._conn = conn
 
+    @staticmethod
+    async def _table_columns(conn: aiosqlite.Connection, table_name: str) -> set[str]:
+        cursor = await conn.execute(f"PRAGMA table_info({table_name})")
+        return {row[1] for row in await cursor.fetchall()}
+
+    @classmethod
+    async def initialize_database(cls) -> None:
+        """按 init.sql 初始化数据库，并补齐旧版本缺失的列。"""
+        db_path = os.environ.get("DB_PATH", "data/kaoyan.db")
+        if db_path != ":memory:":
+            Path(db_path).expanduser().resolve().parent.mkdir(
+                parents=True, exist_ok=True
+            )
+
+        schema_path = Path(__file__).resolve().parents[3] / "init.sql"
+        schema_sql = schema_path.read_text(encoding="utf-8")
+        conn = await aiosqlite.connect(db_path)
+        try:
+            await conn.execute("PRAGMA journal_mode=WAL")
+            await conn.execute("PRAGMA foreign_keys=ON")
+
+            # 旧 init.sql 会先创建精简版 word_bank，需在创建索引前补列。
+            word_columns = await cls._table_columns(conn, "word_bank")
+            if word_columns:
+                if "rank_order" not in word_columns:
+                    await conn.execute(
+                        "ALTER TABLE word_bank ADD COLUMN rank_order INTEGER DEFAULT 0"
+                    )
+                if "category" not in word_columns:
+                    await conn.execute(
+                        "ALTER TABLE word_bank ADD COLUMN category TEXT DEFAULT 'core'"
+                    )
+
+            await conn.executescript(schema_sql)
+
+            migrations = {
+                "users": {
+                    "is_banned": "BOOLEAN NOT NULL DEFAULT 0",
+                    "ban_reason": "TEXT",
+                    "banned_at": "DATETIME",
+                },
+                "weekly_plan": {
+                    "scheduled_time": "TEXT",
+                    "reminder_sent": "INTEGER NOT NULL DEFAULT 0",
+                },
+                "word_bank": {
+                    "phase": "TEXT NOT NULL DEFAULT 'base'",
+                    "rank_order": "INTEGER DEFAULT 0",
+                    "category": "TEXT DEFAULT 'core'",
+                },
+                "user_word_status": {
+                    "last_pushed_at": "DATETIME",
+                    "total_seen": "INTEGER NOT NULL DEFAULT 0",
+                    "total_correct": "INTEGER NOT NULL DEFAULT 0",
+                    "last_seen_at": "TEXT",
+                    "created_at": "TEXT",
+                },
+            }
+            for table_name, required_columns in migrations.items():
+                existing = await cls._table_columns(conn, table_name)
+                for column_name, column_type in required_columns.items():
+                    if column_name not in existing:
+                        await conn.execute(
+                            f"ALTER TABLE {table_name} "
+                            f"ADD COLUMN {column_name} {column_type}"
+                        )
+
+            await conn.commit()
+        finally:
+            await conn.close()
+
     async def commit(self) -> None:
         """提交当前事务。供外部批量操作后统一提交使用。"""
+        await self._conn.commit()
+
+    async def ensure_user_exists(self) -> None:
+        """
+        确保当前绑定的 user_id 已在 users 表中注册。
+        用于网页 session 等非 QQ 好友申请入口；调用方传入的必须已经是 hash 后 ID。
+        """
+        invite_code = generate_invite_code(self._uid)
+        await self._conn.execute(
+            """INSERT OR IGNORE INTO users (user_id, invite_code)
+               VALUES (?, ?)""",
+            (self._uid, invite_code),
+        )
+        await self._conn.execute(
+            "INSERT OR IGNORE INTO persona_config (user_id) VALUES (?)",
+            (self._uid,),
+        )
+        await self._conn.execute(
+            "INSERT OR IGNORE INTO points_account (user_id) VALUES (?)",
+            (self._uid,),
+        )
         await self._conn.commit()
 
     # ── 人物卡相关 ──────────────────────────────
@@ -230,9 +327,7 @@ class UserDB:
 
     # ── 周计划（AI 驱动） ──────────────────────
 
-    async def save_weekly_plan(
-        self, week_start: str, plan_items: list[dict]
-    ) -> None:
+    async def save_weekly_plan(self, week_start: str, plan_items: list[dict]) -> None:
         """
         保存 LLM 生成的周计划。
         先清除同一 week_start 的旧计划，再批量写入。
@@ -240,7 +335,7 @@ class UserDB:
         plan_items 每项字段：
             plan_date, day_index, subject_id(可None), kp_id(可None),
             topic_name, subject_name, order_in_day,
-            estimated_minutes, notes(可None)
+            estimated_minutes, notes(可None), status(可None)
         """
         # 清除旧计划
         await self._conn.execute(
@@ -253,8 +348,9 @@ class UserDB:
                 """INSERT INTO weekly_plan
                    (user_id, week_start, plan_date, day_index,
                     subject_id, kp_id, topic_name, subject_name,
-                    order_in_day, estimated_minutes, scheduled_time, notes)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    order_in_day, estimated_minutes, scheduled_time, notes,
+                    status, completed_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     self._uid,
                     week_start,
@@ -268,6 +364,8 @@ class UserDB:
                     item.get("estimated_minutes", 60),
                     item.get("scheduled_time", ""),
                     item.get("notes"),
+                    item.get("status", "pending"),
+                    item.get("completed_at"),
                 ),
             )
         await self._conn.commit()
@@ -301,11 +399,26 @@ class UserDB:
     async def mark_weekly_plan_done(self, plan_id: int) -> None:
         """标记某条周计划为完成。"""
         from datetime import datetime
+
         await self._conn.execute(
             """UPDATE weekly_plan
                SET status = 'done', completed_at = ?
                WHERE id = ? AND user_id = ?""",
             (datetime.now().isoformat(), plan_id, self._uid),
+        )
+        await self._conn.commit()
+
+    async def update_weekly_plan_status(self, plan_id: int, status: str) -> None:
+        """更新某条周计划状态。status 仅允许 pending/done/skipped。"""
+        if status not in {"pending", "done", "skipped"}:
+            raise ValueError("invalid weekly plan status")
+
+        completed_at = datetime.now().isoformat() if status == "done" else None
+        await self._conn.execute(
+            """UPDATE weekly_plan
+               SET status = ?, completed_at = ?
+               WHERE id = ? AND user_id = ?""",
+            (status, completed_at, plan_id, self._uid),
         )
         await self._conn.commit()
 
@@ -346,7 +459,6 @@ class UserDB:
             (plan_id, self._uid),
         )
         await self._conn.commit()
-
 
     # ── Scheduler 专用方法 ─────────────────────
 

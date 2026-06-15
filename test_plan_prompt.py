@@ -4,7 +4,8 @@
 
 用法：
   python test_plan_prompt.py                          # 默认 gemini-2.5-flash
-  python test_plan_prompt.py --model gemini-2.5-pro   # 指定模型
+  python test_plan_prompt.py                          # 使用 CHAT_MODEL
+  python test_plan_prompt.py --model your-model      # 临时覆盖模型
   python test_plan_prompt.py --step monthly           # 只测月目标
   python test_plan_prompt.py --step weekly             # 只测周计划（用硬编码月目标）
   python test_plan_prompt.py --step both               # 两步都测（默认）
@@ -35,12 +36,25 @@ SUBJECTS_WITH_KPS = [
         "name": "数学（一）",
         "category": "公共课",
         "knowledge_points": [
-            "实数集与函数", "极限与连续", "导数与微分", "一元函数微分学",
-            "微分中值定理", "一元函数积分学", "实数的完备性",
-            "不定积分", "定积分及应用", "无穷级数",
-            "多元函数微分学", "多元函数积分学", "线性代数模块",
-            "向量与线性方程组", "矩阵与变换", "特征值与二次型",
-            "概率论基础", "随机变量", "数理统计"
+            "实数集与函数",
+            "极限与连续",
+            "导数与微分",
+            "一元函数微分学",
+            "微分中值定理",
+            "一元函数积分学",
+            "实数的完备性",
+            "不定积分",
+            "定积分及应用",
+            "无穷级数",
+            "多元函数微分学",
+            "多元函数积分学",
+            "线性代数模块",
+            "向量与线性方程组",
+            "矩阵与变换",
+            "特征值与二次型",
+            "概率论基础",
+            "随机变量",
+            "数理统计",
         ],
     },
     {
@@ -51,7 +65,7 @@ SUBJECTS_WITH_KPS = [
             "英语长难句分析与翻译",
             "阅读理解精练",
             "完形填空与新题型",
-            "写作模板与高分句型"
+            "写作模板与高分句型",
         ],
     },
     {
@@ -64,7 +78,7 @@ SUBJECTS_WITH_KPS = [
             "唯物史观与社会发展规律",
             "毛泽东思想及其历史地位",
             "中国特色社会主义理论",
-            "思想道德与法治"
+            "思想道德与法治",
         ],
     },
     {
@@ -86,7 +100,7 @@ SUBJECTS_WITH_KPS = [
             "内存管理与虚拟存储",
             "文件系统与I/O管理",
             "计算机网络体系结构",
-            "TCP/IP协议与网络安全"
+            "TCP/IP协议与网络安全",
         ],
     },
 ]
@@ -215,10 +229,30 @@ WEEKLY_PLAN_PROMPT = """\
 
 # 硬编码的月目标（--step weekly 时使用）
 DEFAULT_MONTHLY_GOALS = [
-    {"subject": "数学（一）", "topics": ["极限与连续"], "priority": "high", "reason": "数学基础核心"},
-    {"subject": "计算机学科专业基础", "topics": ["数据结构基本概念与算法复杂度分析"], "priority": "high", "reason": "408第一章"},
-    {"subject": "英语（一）", "topics": ["考研英语核心 5500 词汇深度记忆"], "priority": "high", "reason": "前期词汇为主"},
-    {"subject": "思想政治理论", "topics": ["马克思主义基本原理概论"], "priority": "medium", "reason": "政治入门"},
+    {
+        "subject": "数学（一）",
+        "topics": ["极限与连续"],
+        "priority": "high",
+        "reason": "数学基础核心",
+    },
+    {
+        "subject": "计算机学科专业基础",
+        "topics": ["数据结构基本概念与算法复杂度分析"],
+        "priority": "high",
+        "reason": "408第一章",
+    },
+    {
+        "subject": "英语（一）",
+        "topics": ["考研英语核心 5500 词汇深度记忆"],
+        "priority": "high",
+        "reason": "前期词汇为主",
+    },
+    {
+        "subject": "思想政治理论",
+        "topics": ["马克思主义基本原理概论"],
+        "priority": "medium",
+        "reason": "政治入门",
+    },
 ]
 
 
@@ -226,32 +260,33 @@ DEFAULT_MONTHLY_GOALS = [
 # LLM 调用
 # ──────────────────────────────────────────────
 
+
 async def call_llm(prompt: str, model: str) -> str:
-    """调用 Gemini API 生成响应"""
-    import google.generativeai as genai
+    """通过 OpenAI 兼容协议生成响应。"""
+    from openai import AsyncOpenAI
 
-    api_key = os.environ.get("GEMINI_API_KEY", "")
-    base_url = os.environ.get("GEMINI_BASE_URL", "")
+    api_key = os.environ.get("API_KEY", "")
+    if not api_key:
+        raise RuntimeError("请在 .env 中配置 API_KEY")
 
+    client_kwargs = {"api_key": api_key}
+    base_url = os.environ.get("BASE_URL", "")
     if base_url:
-        genai.configure(api_key=api_key, transport="rest",
-                        client_options={"api_endpoint": base_url})
-    else:
-        genai.configure(api_key=api_key)
-
-    gen_model = genai.GenerativeModel(model)
-    config = genai.GenerationConfig(
-        temperature=0.2,
-        response_mime_type="application/json",
-    )
+        client_kwargs["base_url"] = base_url
+    client = AsyncOpenAI(**client_kwargs)
 
     print(f"\n⏳ 调用模型 {model}...")
     t0 = time.time()
-    response = await gen_model.generate_content_async(prompt, generation_config=config)
+    response = await client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.2,
+        max_tokens=8000,
+    )
     elapsed = time.time() - t0
     print(f"✅ 响应完成（{elapsed:.1f}秒）")
 
-    return response.text
+    return response.choices[0].message.content or ""
 
 
 def clean_json(text: str) -> str:
@@ -268,6 +303,7 @@ def clean_json(text: str) -> str:
 # 主流程
 # ──────────────────────────────────────────────
 
+
 async def test_monthly(model: str) -> list[dict]:
     """测试月目标生成"""
     months_left = max(1, round(DAYS_LEFT / 30, 1))
@@ -279,13 +315,17 @@ async def test_monthly(model: str) -> list[dict]:
         months_left=months_left,
         today=TODAY,
         subjects_json=json.dumps(SUBJECTS_WITH_KPS, ensure_ascii=False, indent=2),
-        mastered_json=json.dumps(MASTERED_KPS, ensure_ascii=False) if MASTERED_KPS else "无",
+        mastered_json=json.dumps(MASTERED_KPS, ensure_ascii=False)
+        if MASTERED_KPS
+        else "无",
     )
 
     print("\n" + "=" * 60)
     print("📋 第一步：月目标生成")
     print(f"   模型: {model}")
-    print(f"   距考试: {DAYS_LEFT} 天（{'前期' if DAYS_LEFT > 150 else '中期' if DAYS_LEFT > 60 else '后期'}）")
+    print(
+        f"   距考试: {DAYS_LEFT} 天（{'前期' if DAYS_LEFT > 150 else '中期' if DAYS_LEFT > 60 else '后期'}）"
+    )
     print("=" * 60)
 
     raw = await call_llm(prompt, model)
@@ -300,14 +340,14 @@ async def test_monthly(model: str) -> list[dict]:
 
     # 统计分析
     total_topics = sum(len(g.get("topics", [])) for g in goals)
-    print(f"\n📊 月目标结果:")
+    print("\n📊 月目标结果:")
     print(f"   科目数: {len(goals)}")
     print(f"   知识点总数: {total_topics}")
 
     if DAYS_LEFT > 150 and total_topics > 5:
         print(f"   ⚠️ 警告：前期知识点超过5个上限！({total_topics})")
     elif DAYS_LEFT > 150 and total_topics <= 5:
-        print(f"   ✅ 符合前期上限（≤5个）")
+        print("   ✅ 符合前期上限（≤5个）")
 
     for g in goals:
         topics = g.get("topics", [])
@@ -357,14 +397,14 @@ async def test_weekly(model: str, monthly_goals: list[dict]) -> list[dict]:
     actual_topics = set(item.get("topic", "") for item in plan)
     illegal = actual_topics - valid_topics
 
-    print(f"\n📊 周计划结果:")
+    print("\n📊 周计划结果:")
     print(f"   总任务数: {len(plan)}")
     print(f"   不同知识点: {len(actual_topics)}")
 
     if illegal:
         print(f"   ❌ 非法知识点（不在月目标中）: {illegal}")
     else:
-        print(f"   ✅ 所有知识点均在月目标范围内")
+        print("   ✅ 所有知识点均在月目标范围内")
 
     # 按天展示
     day_map: dict[int, list] = {}
@@ -372,7 +412,6 @@ async def test_weekly(model: str, monthly_goals: list[dict]) -> list[dict]:
         d = item.get("day", 0)
         day_map.setdefault(d, []).append(item)
 
-    weekday_zh = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
     for day_num in sorted(day_map.keys()):
         items = day_map[day_num]
         date_str = items[0].get("date", "?")
@@ -387,7 +426,7 @@ async def test_weekly(model: str, monthly_goals: list[dict]) -> list[dict]:
             print(f"      {marker} [{t}] {subj}：{topic}（{mins}分钟）{notes}")
 
     # 检查每个月目标知识点是否每天都出现
-    print(f"\n📊 知识点覆盖分析:")
+    print("\n📊 知识点覆盖分析:")
     for topic in valid_topics:
         days_with_topic = set()
         for item in plan:
@@ -402,13 +441,23 @@ async def test_weekly(model: str, monthly_goals: list[dict]) -> list[dict]:
 
 async def main():
     parser = argparse.ArgumentParser(description="测试月目标+周计划提示词效果")
-    parser.add_argument("--model", default="gemini-2.5-flash",
-                        help="模型名称（默认 gemini-2.5-flash）")
-    parser.add_argument("--step", choices=["monthly", "weekly", "both"], default="both",
-                        help="测试步骤：monthly/weekly/both（默认 both）")
-    parser.add_argument("--days", type=int, default=None,
-                        help="覆盖距考试天数（测试不同阶段）")
+    parser.add_argument(
+        "--model",
+        default=os.environ.get("CHAT_MODEL", ""),
+        help="模型名称（默认读取 CHAT_MODEL）",
+    )
+    parser.add_argument(
+        "--step",
+        choices=["monthly", "weekly", "both"],
+        default="both",
+        help="测试步骤：monthly/weekly/both（默认 both）",
+    )
+    parser.add_argument(
+        "--days", type=int, default=None, help="覆盖距考试天数（测试不同阶段）"
+    )
     args = parser.parse_args()
+    if not args.model:
+        parser.error("请通过 CHAT_MODEL 或 --model 配置模型名")
 
     global DAYS_LEFT
     if args.days is not None:

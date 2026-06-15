@@ -54,14 +54,10 @@ HOST=0.0.0.0
 PORT=8080
 DRIVER=~fastapi
 
-# Gemini API（通用模型）
-GEMINI_API_KEY=你的key
-GEMINI_BASE_URL=https://fast.poloapi.com
-GEMINI_MODEL=gemini-3-flash-preview
-
-# Claude API（计划生成）
-POLOAI_API_KEY=你的key
-POLOAI_BASE_URL=https://fast.poloai.top
+# AI 配置（OpenAI 兼容协议，所有能力统一使用 CHAT_MODEL）
+API_KEY=你的 API Key
+BASE_URL=https://你的兼容协议地址/v1
+CHAT_MODEL=你的模型名
 
 # 研招网爬虫账号
 CHSI_USERNAME=你的账号

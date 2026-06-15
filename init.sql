@@ -143,6 +143,8 @@ CREATE TABLE IF NOT EXISTS weekly_plan (
     subject_name        TEXT NOT NULL,              -- 科目名称快照
     order_in_day        INTEGER NOT NULL DEFAULT 0, -- 同一天内的排列顺序
     estimated_minutes   INTEGER NOT NULL DEFAULT 60,
+    scheduled_time      TEXT,
+    reminder_sent       INTEGER NOT NULL DEFAULT 0,
     status              TEXT NOT NULL DEFAULT 'pending', -- pending / done / skipped
     completed_at        DATETIME,
     notes               TEXT,                       -- LLM 生成的学习建议
@@ -186,7 +188,9 @@ CREATE TABLE IF NOT EXISTS word_bank (
     word        TEXT NOT NULL UNIQUE,
     meaning     TEXT NOT NULL,
     phase       TEXT NOT NULL DEFAULT 'base',   -- base / intensive / sprint
-    frequency   INTEGER NOT NULL DEFAULT 2      -- 1-3，词频重要性
+    frequency   INTEGER NOT NULL DEFAULT 2,     -- 1-3，词频重要性
+    rank_order  INTEGER DEFAULT 0,              -- 词频排名（1=最高频）
+    category    TEXT DEFAULT 'core'             -- core/basic
 );
 
 CREATE TABLE IF NOT EXISTS user_word_status (
@@ -196,7 +200,11 @@ CREATE TABLE IF NOT EXISTS user_word_status (
     weight          REAL NOT NULL DEFAULT 1.0,  -- 错题本权重
     correct_streak  INTEGER NOT NULL DEFAULT 0,
     last_pushed_at  DATETIME,
+    total_seen      INTEGER NOT NULL DEFAULT 0,
+    total_correct   INTEGER NOT NULL DEFAULT 0,
     in_error_book   BOOLEAN NOT NULL DEFAULT 0,
+    last_seen_at    TEXT,
+    created_at      TEXT DEFAULT (datetime('now')),
     UNIQUE (user_id, word_id),
     FOREIGN KEY (user_id) REFERENCES users(user_id),
     FOREIGN KEY (word_id) REFERENCES word_bank(id)
@@ -351,35 +359,6 @@ CREATE TABLE IF NOT EXISTS knowledge_checklist (
     notes           TEXT,
     created_at      DATETIME NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (user_id) REFERENCES users(user_id)
-);
-
--- ─────────────────────────────────────────────
--- 英语推词
--- ─────────────────────────────────────────────
-
--- 考研英语词库（全局共享，不区分用户）
-CREATE TABLE IF NOT EXISTS word_bank (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    word        TEXT NOT NULL UNIQUE,              -- 英文单词
-    meaning     TEXT NOT NULL,                     -- 中文释义
-    frequency   INTEGER DEFAULT 0,                 -- 考研真题词频
-    rank_order  INTEGER DEFAULT 0,                 -- 词频排名（1=最高频）
-    category    TEXT DEFAULT 'core'                -- core/basic（超高频词如 the/a 标为 basic）
-);
-
--- 用户单词学习状态
-CREATE TABLE IF NOT EXISTS user_word_status (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id         TEXT NOT NULL,
-    word_id         INTEGER NOT NULL REFERENCES word_bank(id),
-    weight          REAL DEFAULT 1.0,              -- 推送权重，越高越优先推
-    correct_streak  INTEGER DEFAULT 0,             -- 连续答对次数
-    total_seen      INTEGER DEFAULT 0,             -- 总见面次数
-    total_correct   INTEGER DEFAULT 0,             -- 总答对次数
-    in_error_book   INTEGER DEFAULT 0,             -- 是否在错词本中
-    last_seen_at    TEXT,                           -- 上次见面时间
-    created_at      TEXT DEFAULT (datetime('now')),
-    UNIQUE(user_id, word_id)
 );
 
 -- ─────────────────────────────────────────────

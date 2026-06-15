@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime
+from pathlib import Path
 from typing import AsyncGenerator
 
 import aiosqlite
@@ -20,6 +21,7 @@ import aiosqlite
 # ──────────────────────────────────────────────
 # 数据库连接管理
 # ──────────────────────────────────────────────
+
 
 @asynccontextmanager
 async def get_db_conn() -> AsyncGenerator[aiosqlite.Connection, None]:
@@ -50,6 +52,7 @@ async def get_db_conn() -> AsyncGenerator[aiosqlite.Connection, None]:
 # UserDB 封装类
 # ──────────────────────────────────────────────
 
+
 class UserDB:
     """
     绑定 user_id 的数据库操作类。
@@ -62,6 +65,76 @@ class UserDB:
     def __init__(self, user_id: str, conn: aiosqlite.Connection) -> None:
         self._uid = user_id
         self._conn = conn
+
+    @staticmethod
+    async def _table_columns(conn: aiosqlite.Connection, table_name: str) -> set[str]:
+        cursor = await conn.execute(f"PRAGMA table_info({table_name})")
+        return {row[1] for row in await cursor.fetchall()}
+
+    @classmethod
+    async def initialize_database(cls) -> None:
+        """按 init.sql 初始化数据库，并补齐旧版本缺失的列。"""
+        db_path = os.environ.get("DB_PATH", "data/kaoyan.db")
+        if db_path != ":memory:":
+            Path(db_path).expanduser().resolve().parent.mkdir(
+                parents=True, exist_ok=True
+            )
+
+        schema_path = Path(__file__).resolve().parents[3] / "init.sql"
+        schema_sql = schema_path.read_text(encoding="utf-8")
+        conn = await aiosqlite.connect(db_path)
+        try:
+            await conn.execute("PRAGMA journal_mode=WAL")
+            await conn.execute("PRAGMA foreign_keys=ON")
+
+            word_columns = await cls._table_columns(conn, "word_bank")
+            if word_columns:
+                if "rank_order" not in word_columns:
+                    await conn.execute(
+                        "ALTER TABLE word_bank ADD COLUMN rank_order INTEGER DEFAULT 0"
+                    )
+                if "category" not in word_columns:
+                    await conn.execute(
+                        "ALTER TABLE word_bank ADD COLUMN category TEXT DEFAULT 'core'"
+                    )
+
+            await conn.executescript(schema_sql)
+
+            migrations = {
+                "users": {
+                    "is_banned": "BOOLEAN NOT NULL DEFAULT 0",
+                    "ban_reason": "TEXT",
+                    "banned_at": "DATETIME",
+                },
+                "weekly_plan": {
+                    "scheduled_time": "TEXT",
+                    "reminder_sent": "INTEGER NOT NULL DEFAULT 0",
+                },
+                "word_bank": {
+                    "phase": "TEXT NOT NULL DEFAULT 'base'",
+                    "rank_order": "INTEGER DEFAULT 0",
+                    "category": "TEXT DEFAULT 'core'",
+                },
+                "user_word_status": {
+                    "last_pushed_at": "DATETIME",
+                    "total_seen": "INTEGER NOT NULL DEFAULT 0",
+                    "total_correct": "INTEGER NOT NULL DEFAULT 0",
+                    "last_seen_at": "TEXT",
+                    "created_at": "TEXT",
+                },
+            }
+            for table_name, required_columns in migrations.items():
+                existing = await cls._table_columns(conn, table_name)
+                for column_name, column_type in required_columns.items():
+                    if column_name not in existing:
+                        await conn.execute(
+                            f"ALTER TABLE {table_name} "
+                            f"ADD COLUMN {column_name} {column_type}"
+                        )
+
+            await conn.commit()
+        finally:
+            await conn.close()
 
     async def commit(self) -> None:
         """提交当前事务。供外部批量操作后统一提交使用。"""
@@ -230,9 +303,7 @@ class UserDB:
 
     # ── 周计划（AI 驱动） ──────────────────────
 
-    async def save_weekly_plan(
-        self, week_start: str, plan_items: list[dict]
-    ) -> None:
+    async def save_weekly_plan(self, week_start: str, plan_items: list[dict]) -> None:
         """
         保存 LLM 生成的周计划。
         先清除同一 week_start 的旧计划，再批量写入。
@@ -301,6 +372,7 @@ class UserDB:
     async def mark_weekly_plan_done(self, plan_id: int) -> None:
         """标记某条周计划为完成。"""
         from datetime import datetime
+
         await self._conn.execute(
             """UPDATE weekly_plan
                SET status = 'done', completed_at = ?
@@ -346,7 +418,6 @@ class UserDB:
             (plan_id, self._uid),
         )
         await self._conn.commit()
-
 
     # ── Scheduler 专用方法 ─────────────────────
 

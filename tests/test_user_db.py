@@ -136,7 +136,46 @@ async def test():
         assert len(plan) == 1
         print(f"  get_daily_plan OK: 共 {len(plan)} 条")
 
-        # 8. 用户隔离
+        # 8. web 用户计划
+        web_uid = "web_user_hash_003"
+        web_db = UserDB(web_uid, conn)
+        await web_db.ensure_user_exists()
+        await web_db.save_weekly_plan(
+            "2026-06-15",
+            [
+                {
+                    "plan_date": "2026-06-15",
+                    "day_index": 0,
+                    "topic_name": "背核心词 30 个",
+                    "subject_name": "英语",
+                    "order_in_day": 0,
+                    "estimated_minutes": 30,
+                    "scheduled_time": "08:30",
+                    "notes": "网页端自定义计划",
+                },
+                {
+                    "plan_date": "2026-06-16",
+                    "day_index": 1,
+                    "topic_name": "线代错题整理",
+                    "subject_name": "数学",
+                    "order_in_day": 0,
+                    "estimated_minutes": 45,
+                    "scheduled_time": "19:30",
+                },
+            ],
+        )
+        latest_week = await web_db.get_latest_week_start()
+        assert latest_week == "2026-06-15"
+        web_plan = await web_db.get_weekly_plan("2026-06-15")
+        assert len(web_plan) == 2
+        assert web_plan[0]["topic_name"] == "背核心词 30 个"
+        await web_db.update_weekly_plan_status(web_plan[0]["id"], "done")
+        updated_plan = await web_db.get_weekly_plan("2026-06-15")
+        assert updated_plan[0]["status"] == "done"
+        assert updated_plan[0]["completed_at"] is not None
+        print("  web 用户计划 OK: 可注册、保存、读取、完成")
+
+        # 9. 用户隔离
         other_uid = "other_user_hash_002"
         await conn.execute(
             "INSERT INTO users (user_id, invite_code) VALUES (?, ?)",

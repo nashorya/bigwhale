@@ -9,9 +9,9 @@
 | 级联生成（月→周） | ✅ | Claude vision 效果最佳，暂缓科目正确排除 |
 | 本周计划（非模板） | ✅ | 每周具体任务，与月度目标一致 |
 | 单词碎片化 | ✅ | 英语整块只安排精读/翻译，单词交 Bot 推送 |
-| 课表视觉识别 | ✅ Claude / ⚠️ Gemini | Claude 稳定，Gemini 中转站传图不稳定 |
+| 课表视觉识别 | ✅ 多模态聊天模型 | 通过 OpenAI 兼容协议传图 |
 | 智谱 Embedding | ✅ | `embedding-3`，2048维，598ms，语义区分优秀 |
-| Gemini Embedding | ❌ | 中转站不支持 |
+| Embedding | ❌ | 当前通用聊天接口未启用 |
 | 水课识别 | 📝 设计完成 | flash-lite 识别 → 用户确认 → prompt 注入 |
 
 ## 技术栈决定
@@ -20,7 +20,7 @@
 |------|------|------|
 | 月度规划生成 | Claude Sonnet | 视觉稳定，格式好 |
 | 周计划级联 | Claude Sonnet | 同上，视觉+级联一次搞定 |
-| 水课识别 | Gemini flash-lite | 便宜快，轻量判断 |
+| 水课识别 | `CHAT_MODEL` | 与其他 AI 能力统一配置 |
 | Memory Embedding | **智谱 embedding-3** | 零安装，2048维，<1分钱/月 |
 | Memory 搜索 | 余弦相似度 | numpy 即可 |
 

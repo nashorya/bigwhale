@@ -47,6 +47,13 @@ output_*/
 output_test/
 zhipu_result.txt
 
+# macOS
+.DS_Store
+
+# Node.js
+node_modules/
+dist/
+
 # Temp/Misc Files
 微信图片_20260318191934_206_23.jpg
 *.log

@@ -1,5 +1,5 @@
 """
-AI 服务模块 — 封装 Gemini API 与外部搜索调用。
+AI 服务模块 — 封装 OpenAI 兼容协议与外部搜索调用。
 
 提供考研科目检索、知识点生成等 AI 能力。
 策略：研招网爬取科目 → Tavily 搜索知识点 → LLM 结构化/回退。
@@ -11,49 +11,39 @@ import asyncio
 import json
 import logging
 import os
-from typing import Any, TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from google import genai
-    from google.genai import types
+from typing import Any
 
 logger = logging.getLogger("shore.ai_service")
 
 # ──────────────────────────────────────────────
-# Gemini 客户端配置
+# OpenAI 兼容协议客户端配置
 # ──────────────────────────────────────────────
 
 _client = None
 
 
 def _get_client():
-    """获取或创建 Gemini 客户端（延迟初始化）"""
-    from google import genai
-    from google.genai import types
-
+    """获取或创建 OpenAI 兼容协议客户端（延迟初始化）。"""
     global _client
     if _client is None:
-        api_key = os.environ.get("GEMINI_API_KEY", "")
+        from openai import AsyncOpenAI
+
+        api_key = os.environ.get("API_KEY", "")
         if not api_key:
             raise RuntimeError(
-                "未配置 GEMINI_API_KEY 环境变量。"
-                "请在 .env 文件中添加 GEMINI_API_KEY=your_key"
+                "未配置 API_KEY 环境变量。请在 .env 文件中添加 API_KEY。"
             )
-        base_url = os.environ.get("GEMINI_BASE_URL", "")
+        base_url = os.environ.get("BASE_URL", "")
+        kwargs: dict[str, Any] = {"api_key": api_key}
         if base_url:
-            # 使用中转站/代理地址
-            _client = genai.Client(
-                api_key=api_key,
-                http_options=types.HttpOptions(base_url=base_url),
-            )
-        else:
-            _client = genai.Client(api_key=api_key)
+            kwargs["base_url"] = base_url
+        _client = AsyncOpenAI(**kwargs)
     return _client
 
 
 def _get_model() -> str:
-    """获取模型名称"""
-    return os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+    """获取通用聊天模型名。"""
+    return _get_chat_model()
 
 
 # 重试配置
@@ -66,101 +56,63 @@ async def _generate_with_retry(
     temperature: float = 0.3,
     response_mime_type: str | None = None,
     system_instruction: str | None = None,
+    max_tokens: int = 8000,
 ) -> str | None:
     """
-    带重试的 Gemini API 调用（应对中转站间歇性 401）。
+    带重试的 OpenAI 兼容协议调用。
 
     最多重试 3 次，每次间隔递增。
     """
-    from google.genai import types
-
     client = _get_client()
     model = _get_model()
 
-    config_kwargs: dict = {"temperature": temperature}
-    if response_mime_type:
-        config_kwargs["response_mime_type"] = response_mime_type
+    messages: list[dict[str, str]] = []
     if system_instruction:
-        config_kwargs["system_instruction"] = system_instruction
-    config = types.GenerateContentConfig(**config_kwargs)
+        messages.append({"role": "system", "content": system_instruction})
+    messages.append({"role": "user", "content": prompt})
 
     last_error = None
     for attempt in range(_MAX_RETRIES):
         try:
-            response = await client.aio.models.generate_content(
+            response = await client.chat.completions.create(
                 model=model,
-                contents=prompt,
-                config=config,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
             )
-            return response.text or ""
+            return response.choices[0].message.content or ""
         except Exception as e:
             last_error = e
             err_str = str(e)
             # 仅对 401/429/5xx 等暂时性错误重试
-            if "401" in err_str or "429" in err_str or "500" in err_str or "503" in err_str:
+            if (
+                "401" in err_str
+                or "429" in err_str
+                or "500" in err_str
+                or "503" in err_str
+            ):
                 delay = _RETRY_DELAYS[min(attempt, len(_RETRY_DELAYS) - 1)]
                 logger.warning(
-                    "Gemini API 暂时性错误 (第%d次), %d秒后重试: %s",
-                    attempt + 1, delay, err_str[:100],
+                    "AI API 暂时性错误 (第%d次), %d秒后重试: %s",
+                    attempt + 1,
+                    delay,
+                    err_str[:100],
                 )
                 await asyncio.sleep(delay)
             else:
                 # 非暂时性错误，直接抛出
                 raise
 
-    logger.error("Gemini API 重试 %d 次后仍失败: %s", _MAX_RETRIES, last_error)
+    logger.error("AI API 重试 %d 次后仍失败: %s", _MAX_RETRIES, last_error)
     raise last_error  # type: ignore
 
 
 # ──────────────────────────────────────────────
-# Claude 计划生成（通过 poloai OpenAI 兼容 API）
+# 计划生成
 # ──────────────────────────────────────────────
 
-# 计划生成模型（Claude 质量更高，用于学期/月度计划）
-_PLAN_MODEL = os.environ.get("PLAN_MODEL", "claude-sonnet-4-6")
 
-_openai_client = None
-
-
-def _get_openai_client():
-    """获取 OpenAI 兼容客户端（poloai 代理）"""
-    global _openai_client
-    if _openai_client is None:
-        from openai import AsyncOpenAI
-        # poloai 统一 API key（优先 POLOAI_API_KEY，回退 GEMINI_API_KEY）
-        api_key = os.environ.get("POLOAI_API_KEY", "") or os.environ.get("GEMINI_API_KEY", "")
-        base_url = os.environ.get("POLOAI_BASE_URL", "") or os.environ.get("GEMINI_BASE_URL", "")
-        # poloai 使用 /v1 路径的 OpenAI 兼容 API
-        if base_url and not base_url.endswith("/v1"):
-            base_url = base_url.rstrip("/") + "/v1"
-        _openai_client = AsyncOpenAI(
-            api_key=api_key,
-            base_url=base_url,
-        )
-    return _openai_client
-
-
-# Gemini 专用 OpenAI 客户端（陪聊用，与 Claude 计划生成的 key 分开）
-_gemini_openai_client = None
-
-
-def _get_gemini_openai_client():
-    """获取 Gemini 专用的 OpenAI 兼容客户端（使用 GEMINI_API_KEY）"""
-    global _gemini_openai_client
-    if _gemini_openai_client is None:
-        from openai import AsyncOpenAI
-        api_key = os.environ.get("GEMINI_API_KEY", "")
-        base_url = os.environ.get("GEMINI_BASE_URL", "")
-        if base_url and not base_url.endswith("/v1"):
-            base_url = base_url.rstrip("/") + "/v1"
-        _gemini_openai_client = AsyncOpenAI(
-            api_key=api_key,
-            base_url=base_url,
-        )
-    return _gemini_openai_client
-
-
-async def _generate_with_claude(
+async def _generate_with_plan_model(
     prompt: str,
     temperature: float = 0.3,
     system_instruction: str | None = None,
@@ -168,61 +120,28 @@ async def _generate_with_claude(
     max_tokens: int = 8000,
 ) -> str | None:
     """
-    通过 poloai 代理调用 Claude 模型（OpenAI 兼容格式）。
-    用于计划生成等需要高质量输出的场景。
-
-    注意：Claude API 与 OpenAI 有以下差异：
-    - system 消息不能放在 messages 数组中，需作为顶层参数
-    - 不支持 response_format 参数
+    计划生成统一复用 CHAT_MODEL。
+    保留函数名是为了让既有调用点表达语义清晰。
     """
-    client = _get_openai_client()
-    model = _PLAN_MODEL
-
-    # Claude 不接受 messages 里的 system role，需要放到顶层
-    messages = [{"role": "user", "content": prompt}]
-
-    kwargs: dict[str, Any] = {
-        "model": model,
-        "messages": messages,
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-    }
-
-    # Claude 使用顶层 system 参数
-    if system_instruction:
-        kwargs["extra_body"] = {"system": system_instruction}
-
-    # Claude 不支持 response_format，不传该参数
-    # JSON 输出通过 prompt 中的指令来保证
-
-    last_error = None
-    for attempt in range(_MAX_RETRIES):
-        try:
-            response = await client.chat.completions.create(**kwargs)
-            return response.choices[0].message.content or ""
-        except Exception as e:
-            last_error = e
-            err_str = str(e)
-            if "401" in err_str or "429" in err_str or "500" in err_str or "503" in err_str:
-                delay = _RETRY_DELAYS[min(attempt, len(_RETRY_DELAYS) - 1)]
-                logger.warning(
-                    "Claude API 暂时性错误 (第%d次), %d秒后重试: %s",
-                    attempt + 1, delay, err_str[:100],
-                )
-                await asyncio.sleep(delay)
-            else:
-                raise
-
-    logger.error("Claude API 重试 %d 次后仍失败: %s", _MAX_RETRIES, last_error)
-    raise last_error  # type: ignore
+    return await _generate_with_retry(
+        prompt=prompt,
+        temperature=temperature,
+        system_instruction=system_instruction,
+        max_tokens=max_tokens,
+    )
 
 
 # ──────────────────────────────────────────────
 # 陪聊多轮对话（使用轻量模型）
 # ──────────────────────────────────────────────
 
-# 陪聊模型（默认复用主模型，可通过 CHAT_MODEL 单独指定轻量模型）
-_CHAT_MODEL = os.environ.get("CHAT_MODEL", "") or os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+
+def _get_chat_model() -> str:
+    """获取通用聊天模型名。"""
+    model = os.environ.get("CHAT_MODEL", "")
+    if not model:
+        raise RuntimeError("环境变量 CHAT_MODEL 未设置，请在 .env 中配置模型名。")
+    return model
 
 
 async def generate_chat_response(
@@ -232,7 +151,7 @@ async def generate_chat_response(
 ) -> str:
     """
     多轮对话生成（陪聊模式专用）。
-    使用 OpenAI 兼容 API + Gemini API Key（与计划生成的 Claude Key 分开）。
+    使用 OpenAI 兼容协议。
 
     参数：
         system_prompt: 角色卡 system instruction
@@ -242,23 +161,25 @@ async def generate_chat_response(
     返回：
         AI 回复文本
     """
-    client = _get_gemini_openai_client()
+    client = _get_client()
+    model = _get_chat_model()
 
     # 构建 OpenAI 格式的 messages
     messages = [{"role": "system", "content": system_prompt}]
     for msg in history:
-        # 将 Gemini 的 "model" 角色映射为 OpenAI 的 "assistant"
+        # 兼容数据库中既有的 "model" 角色名
         role = "assistant" if msg["role"] == "model" else "user"
         messages.append({"role": role, "content": msg["text"]})
     messages.append({"role": "user", "content": user_message})
 
     import time as _time
+
     t0 = _time.monotonic()
-    print(f"[陪聊] LLM 调用开始 (model={_CHAT_MODEL}, history={len(history)}条)")
+    print(f"[陪聊] LLM 调用开始 (model={model}, history={len(history)}条)")
     try:
         response = await asyncio.wait_for(
             client.chat.completions.create(
-                model=_CHAT_MODEL,
+                model=model,
                 messages=messages,
                 temperature=0.8,
                 max_tokens=2048,
@@ -266,14 +187,18 @@ async def generate_chat_response(
             timeout=30,  # 30秒超时，防止代理挂起
         )
         elapsed = _time.monotonic() - t0
-        finish_reason = response.choices[0].finish_reason if response.choices else "unknown"
-        full_text = response.choices[0].message.content or "" if response.choices else ""
-        print(f"\n===== 陪聊 LLM 诊断 =====")
+        finish_reason = (
+            response.choices[0].finish_reason if response.choices else "unknown"
+        )
+        full_text = (
+            response.choices[0].message.content or "" if response.choices else ""
+        )
+        print("\n===== 陪聊 LLM 诊断 =====")
         print(f"耗时: {elapsed:.1f}秒")
         print(f"finish_reason: {finish_reason}")
         print(f"回复长度: {len(full_text)} 字符")
         print(f"完整回复: 【{full_text}】")
-        print(f"=========================\n")
+        print("=========================\n")
         return full_text or "……"
     except asyncio.TimeoutError:
         elapsed = _time.monotonic() - t0
@@ -302,6 +227,7 @@ def _get_tavily_client():
             return None
         try:
             from tavily import AsyncTavilyClient
+
             _tavily_client = AsyncTavilyClient(api_key=api_key)
         except ImportError:
             logger.warning("tavily-python 未安装，知识点搜索将回退到纯 LLM")
@@ -368,13 +294,17 @@ async def search_exam_subjects(school: str, major: str) -> dict[str, Any]:
         chsi_user = os.environ.get("CHSI_USERNAME", "")
         logger.info(
             "准备爬取研招网: school=%s, major=%s, CHSI_USERNAME=%s",
-            school, major, f"{chsi_user[:3]}***" if chsi_user else "(未配置)",
+            school,
+            major,
+            f"{chsi_user[:3]}***" if chsi_user else "(未配置)",
         )
         spider_result = await yzchsi_spider.fetch_exam_subjects(school, major)
         if spider_result and spider_result.get("subjects"):
             logger.info(
                 "研招网爬取成功: %s %s, %d 个科目",
-                school, major, len(spider_result["subjects"]),
+                school,
+                major,
+                len(spider_result["subjects"]),
             )
         else:
             logger.info("研招网爬取返回空结果")
@@ -438,7 +368,9 @@ async def _llm_get_subjects(school: str, major: str) -> dict[str, Any] | None:
         result = json.loads(text)
         logger.info(
             "LLM 科目生成成功: %s %s, %d 个科目",
-            school, major, len(result.get("subjects", [])),
+            school,
+            major,
+            len(result.get("subjects", [])),
         )
         return result
 
@@ -518,7 +450,9 @@ async def _get_knowledge_points(
     if tavily:
         try:
             query = _KP_SEARCH_TEMPLATE.format(
-                school=school, major=major, subject_name=subject_name,
+                school=school,
+                major=major,
+                subject_name=subject_name,
             )
             result = await tavily.search(
                 query=query,
@@ -536,7 +470,11 @@ async def _get_knowledge_points(
                 if content:
                     parts.append(f"- {title}: {content[:300]}")
             search_context = "\n".join(parts)
-            logger.info("Tavily 搜索完成: %s, 获取 %d 条结果", subject_name, len(result.get("results", [])))
+            logger.info(
+                "Tavily 搜索完成: %s, 获取 %d 条结果",
+                subject_name,
+                len(result.get("results", [])),
+            )
         except Exception as e:
             logger.warning("Tavily 搜索失败 (%s): %s", subject_name, e)
             search_context = ""
@@ -544,13 +482,15 @@ async def _get_knowledge_points(
     # 2. 用 LLM 结构化（有搜索结果时用搜索增强提示词，否则用纯 LLM 提示词）
     if search_context:
         prompt = _KP_LLM_PROMPT.format(
-            school=school, major=major,
+            school=school,
+            major=major,
             subject_name=subject_name,
             search_context=search_context,
         )
     else:
         prompt = _KP_PURE_LLM_PROMPT.format(
-            school=school, major=major,
+            school=school,
+            major=major,
             subject_name=subject_name,
         )
 
@@ -578,11 +518,19 @@ def _default_knowledge_points(subject_name: str) -> list[str]:
     """兜底的默认知识点（当所有方法失败时）。"""
     defaults = {
         "思想政治理论": [
-            "马克思主义基本原理", "毛泽东思想", "中国特色社会主义理论体系",
-            "中国近现代史纲要", "思想道德与法治", "形势与政策",
+            "马克思主义基本原理",
+            "毛泽东思想",
+            "中国特色社会主义理论体系",
+            "中国近现代史纲要",
+            "思想道德与法治",
+            "形势与政策",
         ],
         "英语": [
-            "完形填空", "阅读理解", "新题型", "翻译", "写作",
+            "完形填空",
+            "阅读理解",
+            "新题型",
+            "翻译",
+            "写作",
         ],
     }
     # 模糊匹配默认知识点
@@ -672,11 +620,13 @@ async def generate_monthly_goals(
     subjects_summary = []
     for s in subjects_with_kps:
         kps = s.get("knowledge_points", [])
-        subjects_summary.append({
-            "name": s["name"],
-            "category": s.get("category", ""),
-            "knowledge_points": kps[:30],
-        })
+        subjects_summary.append(
+            {
+                "name": s["name"],
+                "category": s.get("category", ""),
+                "knowledge_points": kps[:30],
+            }
+        )
 
     months_left = max(1, round(days_left / 30, 1))
 
@@ -687,7 +637,9 @@ async def generate_monthly_goals(
         months_left=months_left,
         today=today,
         subjects_json=_json.dumps(subjects_summary, ensure_ascii=False, indent=2),
-        mastered_json=_json.dumps(mastered_kps, ensure_ascii=False) if mastered_kps else "无",
+        mastered_json=_json.dumps(mastered_kps, ensure_ascii=False)
+        if mastered_kps
+        else "无",
     )
 
     try:
@@ -829,11 +781,86 @@ async def generate_ordered_weekly_plan(
 
 
 # ──────────────────────────────────────────────
+# 网页端通用学习计划生成
+# ──────────────────────────────────────────────
+
+_WEB_STUDY_PLAN_PROMPT = """\
+你是一位学习计划助手。请根据用户想学习的内容，为用户生成接下来7天的学习计划。
+
+## 用户想学的内容
+{goal}
+
+## 生成要求
+1. 计划必须围绕用户输入，不要扩展到无关主题。
+2. 每天安排 1-4 条任务，任务之间体现递进关系。
+3. 每条任务要具体、可执行，topic 不要写成空泛口号。
+4. 如果用户没有指定科目，请根据内容推断一个简短 subject。
+5. 每天总时长建议控制在 {daily_minutes} 分钟左右。
+6. 日期从 {today} 开始连续 7 天。
+7. 不要使用“考研”“备考”等特定考试口径，除非用户输入明确提到。
+
+## 输出格式
+只返回 JSON 数组，不要包含任何其他文字：
+[
+  {{
+    "day": 1,
+    "date": "YYYY-MM-DD",
+    "time": "09:00",
+    "subject": "科目/领域",
+    "topic": "具体学习任务",
+    "estimated_minutes": 45,
+    "notes": "10字以内学习重点"
+  }}
+]
+"""
+
+
+async def generate_web_study_plan(
+    goal: str,
+    today: str,
+    daily_minutes: int = 120,
+) -> list[dict] | None:
+    """
+    根据网页用户输入的学习目标生成 7 天通用学习计划。
+
+    返回项字段与 weekly_plan 映射兼容：
+    day/date/time/subject/topic/estimated_minutes/notes
+    """
+    prompt = _WEB_STUDY_PLAN_PROMPT.format(
+        goal=goal,
+        today=today,
+        daily_minutes=daily_minutes,
+    )
+
+    try:
+        text = await _generate_with_plan_model(
+            prompt=prompt,
+            temperature=0.25,
+            response_format="json",
+            max_tokens=6000,
+        )
+        if not text:
+            return None
+
+        plan = await _load_json_with_repair(text, expected="array")
+        if isinstance(plan, list) and plan:
+            logger.info("网页学习计划生成成功：%d 条任务", len(plan))
+            return plan
+
+    except json.JSONDecodeError as e:
+        logger.error("网页学习计划 JSON 解析失败: %s", e)
+    except Exception as e:
+        logger.error("网页学习计划生成失败: %s", e)
+
+    return None
+
+
+# ──────────────────────────────────────────────
 # 通用 AI 对话（后续扩展用）
 # ──────────────────────────────────────────────
 
-async def chat(prompt: str, system_instruction: str = "") -> str:
 
+async def chat(prompt: str, system_instruction: str = "") -> str:
     """
     通用 AI 对话接口。
 
@@ -844,11 +871,14 @@ async def chat(prompt: str, system_instruction: str = "") -> str:
     返回：
         AI 回复文本
     """
-    return await _generate_with_retry(
-        prompt=prompt,
-        temperature=0.7,
-        system_instruction=system_instruction or None,
-    ) or ""
+    return (
+        await _generate_with_retry(
+            prompt=prompt,
+            temperature=0.7,
+            system_instruction=system_instruction or None,
+        )
+        or ""
+    )
 
 
 # ──────────────────────────────────────────────
@@ -866,6 +896,42 @@ def _clean_json_text(text: str) -> str:
     if text.rstrip().endswith("```"):
         text = text.rstrip()[:-3]
     return text.strip()
+
+
+def _extract_json_candidate(text: str, expected: str) -> str:
+    """从模型回复中截取最外层 JSON，兼容前后夹带说明文字。"""
+    cleaned = _clean_json_text(text)
+    opening, closing = ("[", "]") if expected == "array" else ("{", "}")
+    start = cleaned.find(opening)
+    end = cleaned.rfind(closing)
+    if start >= 0 and end > start:
+        return cleaned[start : end + 1]
+    return cleaned
+
+
+async def _load_json_with_repair(text: str, expected: str) -> Any:
+    """解析模型 JSON；语法错误时使用同一个 CHAT_MODEL 修复一次。"""
+    candidate = _extract_json_candidate(text, expected)
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError as first_error:
+        logger.warning("AI JSON 首次解析失败，尝试修复: %s", first_error)
+
+    expected_name = "JSON 数组" if expected == "array" else "JSON 对象"
+    repair_prompt = (
+        f"下面内容原本应该是合法的{expected_name}，但存在 JSON 语法错误。"
+        "请只修复引号、逗号、转义或括号等语法问题，不改动字段和值，"
+        "不要解释，不要使用 Markdown，只返回修复后的 JSON。\n\n"
+        f"{candidate}"
+    )
+    repaired = await _generate_with_retry(
+        prompt=repair_prompt,
+        temperature=0,
+        max_tokens=6000,
+    )
+    if not repaired:
+        raise json.JSONDecodeError("AI 未返回修复结果", candidate, 0)
+    return json.loads(_extract_json_candidate(repaired, expected))
 
 
 # ──────────────────────────────────────────────
@@ -905,7 +971,7 @@ async def identify_water_courses(
     courses: list[dict],
 ) -> list[dict] | None:
     """
-    使用 flash-lite 识别课程表中的水课。
+    使用轻量模型识别课程表中的水课。
 
     参数：
         courses: 课程列表，每项含 name, day_of_week, time_slot
@@ -920,31 +986,24 @@ async def identify_water_courses(
         courses_json=json.dumps(courses, ensure_ascii=False, indent=2),
     )
 
-    # 使用更便宜的 flash-lite 模型
-    flash_lite_model = os.environ.get("GEMINI_FLASH_LITE_MODEL", "gemini-2.0-flash-lite")
-
     try:
-        from google.genai import types
-        client = _get_client()
-
-        config = types.GenerateContentConfig(
+        text = await _generate_with_retry(
+            prompt=prompt,
             temperature=0.1,
             response_mime_type="application/json",
+            max_tokens=4000,
         )
-
-        response = await client.aio.models.generate_content(
-            model=flash_lite_model,
-            contents=prompt,
-            config=config,
-        )
-        text = response.text or ""
+        if not text:
+            return None
         text = _clean_json_text(text)
         result = json.loads(text)
 
         if isinstance(result, list):
-            logger.info("水课识别完成：%d 门课，%d 门水课",
-                        len(result),
-                        sum(1 for c in result if c.get("is_water")))
+            logger.info(
+                "水课识别完成：%d 门课，%d 门水课",
+                len(result),
+                sum(1 for c in result if c.get("is_water")),
+            )
             return result
 
     except json.JSONDecodeError as e:
@@ -1014,12 +1073,13 @@ _SEMESTER_PLAN_PROMPT = """\
 # P1.5: 置信度自评 + 核心知识清单（从脚本移植）
 # ──────────────────────────────────────────────
 
+
 async def check_subject_confidence(
     subjects: list[str],
     school: str,
 ) -> dict[str, str]:
     """
-    让 Claude 自评能否准确给出每个科目的知识点。
+    让计划生成模型自评能否准确给出每个科目的知识点。
 
     返回：{"数据结构": "high", "某冷门": "low"}
     high = 统考/常见专业课，把握充足
@@ -1030,11 +1090,11 @@ async def check_subject_confidence(
         f"评估你能否准确列出以下科目的考研核心知识点？目标院校：{school}\n"
         f"科目列表：\n{subj_list}\n\n"
         "high=统考/常见专业课把握充足；low=冷门/高度自命题极不确定。\n"
-        "只返回 JSON 对象，示例：{\"数据结构\": \"high\", \"某冷门\": \"low\"}"
+        '只返回 JSON 对象，示例：{"数据结构": "high", "某冷门": "low"}'
     )
 
     try:
-        text = await _generate_with_claude(
+        text = await _generate_with_plan_model(
             prompt=prompt,
             temperature=0.1,
             system_instruction="你是考研专家。诚实评估，不加任何废话。",
@@ -1085,7 +1145,7 @@ async def generate_knowledge_checklist(
     )
 
     try:
-        text = await _generate_with_claude(
+        text = await _generate_with_plan_model(
             prompt=prompt,
             temperature=0.2,
             system_instruction=(
@@ -1150,11 +1210,13 @@ async def generate_semester_plan(
     subjects_summary = []
     for s in subjects:
         kps = s.get("knowledge_points", [])
-        subjects_summary.append({
-            "name": s.get("name", ""),
-            "category": s.get("category", ""),
-            "knowledge_points": kps[:20],
-        })
+        subjects_summary.append(
+            {
+                "name": s.get("name", ""),
+                "category": s.get("category", ""),
+                "knowledge_points": kps[:20],
+            }
+        )
 
     # 构建水课信息
     water_section = ""
@@ -1169,7 +1231,9 @@ async def generate_semester_plan(
     # 构建课表信息
     timetable_section = ""
     if timetable_desc:
-        timetable_section = f"\n8. 课表空闲时段：\n{timetable_desc}\n请基于空闲时段合理安排。\n"
+        timetable_section = (
+            f"\n8. 课表空闲时段：\n{timetable_desc}\n请基于空闲时段合理安排。\n"
+        )
 
     prompt = _SEMESTER_PLAN_PROMPT.format(
         school=school,
@@ -1184,7 +1248,7 @@ async def generate_semester_plan(
     )
 
     try:
-        text = await _generate_with_claude(
+        text = await _generate_with_plan_model(
             prompt=prompt,
             temperature=0.2,
             response_format="json",
@@ -1199,7 +1263,8 @@ async def generate_semester_plan(
             total_goals = sum(len(p.get("goals", [])) for p in plan["phases"])
             logger.info(
                 "学期规划生成成功：%d 个阶段，%d 个月目标",
-                len(plan["phases"]), total_goals,
+                len(plan["phases"]),
+                total_goals,
             )
             return plan
 
@@ -1324,7 +1389,7 @@ async def generate_monthly_schedule(
     返回：
         28天日程列表，或 None
     """
-    from datetime import date as dt_date, timedelta
+    from datetime import date as dt_date
 
     # 提取活跃/暂缓科目
     active, suspended = _extract_active_subjects(current_month_goals)
@@ -1338,6 +1403,7 @@ async def generate_monthly_schedule(
     today_dt = dt_date.fromisoformat(today)
     month_start = today_dt.replace(day=1).isoformat()
     import calendar
+
     last_day = calendar.monthrange(today_dt.year, today_dt.month)[1]
     month_end = today_dt.replace(day=last_day).isoformat()
 
@@ -1345,22 +1411,21 @@ async def generate_monthly_schedule(
     goals_for_prompt = []
     for g in current_month_goals:
         if g.get("subject_name", "") not in suspended:
-            goals_for_prompt.append({
-                "subject": g.get("subject_name", ""),
-                "topics": [g.get("goal_title", "")],
-                "detail": g.get("goal_detail", ""),
-                "priority": {1: "high", 2: "medium", 3: "low"}.get(
-                    g.get("priority", 2), "medium"
-                ),
-            })
+            goals_for_prompt.append(
+                {
+                    "subject": g.get("subject_name", ""),
+                    "topics": [g.get("goal_title", "")],
+                    "detail": g.get("goal_detail", ""),
+                    "priority": {1: "high", 2: "medium", 3: "low"}.get(
+                        g.get("priority", 2), "medium"
+                    ),
+                }
+            )
 
     # 暂缓科目段落
     suspended_section = ""
     if suspended:
-        suspended_section = (
-            f"## 暂缓科目（绝对不要安排！）\n"
-            f"{'、'.join(suspended)}\n"
-        )
+        suspended_section = f"## 暂缓科目（绝对不要安排！）\n{'、'.join(suspended)}\n"
 
     prompt = _MONTHLY_SCHEDULE_PROMPT.format(
         school=school,
@@ -1377,14 +1442,14 @@ async def generate_monthly_schedule(
     )
 
     try:
-        text = await _generate_with_claude(
+        text = await _generate_with_plan_model(
             prompt=prompt,
             temperature=0.2,
             response_format="json",
             max_tokens=16000,
         )
         if not text:
-            logger.error("月度日程: Claude 返回空响应")
+            logger.error("月度日程: 计划生成模型返回空响应")
             return None
 
         # 调试：保存原始响应
@@ -1399,8 +1464,11 @@ async def generate_monthly_schedule(
         text = _clean_json_text(text)
         plan = json.loads(text)
         if isinstance(plan, list) and plan:
-            logger.info("月度日程生成成功：%d 条任务（覆盖 %d 天）",
-                        len(plan), len(set(e.get("day", 0) for e in plan)))
+            logger.info(
+                "月度日程生成成功：%d 条任务（覆盖 %d 天）",
+                len(plan),
+                len(set(e.get("day", 0) for e in plan)),
+            )
             return plan
         else:
             logger.error("月度日程: 解析结果不是非空列表, type=%s", type(plan).__name__)
@@ -1413,4 +1481,3 @@ async def generate_monthly_schedule(
         logger.error("月度日程生成失败: %s", e)
 
     return None
-

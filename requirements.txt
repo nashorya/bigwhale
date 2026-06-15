@@ -1,10 +1,9 @@
-nonebot2
+nonebot2[fastapi]
 nonebot-adapter-onebot
 aiosqlite
 apscheduler
 python-dotenv
 ruff
-google-genai
 aiohttp
 beautifulsoup4
 tavily-python

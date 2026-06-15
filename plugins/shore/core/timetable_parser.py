@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import logging
-from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger("shore.timetable")
@@ -21,6 +20,7 @@ _FREE_CELL_VALUES = {"", "自习", "None", "-", "——", "none", "null"}
 # ──────────────────────────────────────────────
 # xlsx 课表解析
 # ──────────────────────────────────────────────
+
 
 def parse_xlsx_timetable(xlsx_path: str) -> dict[str, Any]:
     """
@@ -55,7 +55,8 @@ def parse_xlsx_timetable(xlsx_path: str) -> dict[str, Any]:
 
     # 读取所有行（跳过空行）
     rows = [
-        row for row in [
+        row
+        for row in [
             [get_cell(r, c) for c in range(1, ws.max_column + 1)]
             for r in range(1, ws.max_row + 1)
         ]
@@ -83,12 +84,15 @@ def parse_xlsx_timetable(xlsx_path: str) -> dict[str, Any]:
 
 
 # ──────────────────────────────────────────────
-# 图片课表解析（Gemini Vision）
+# 图片课表解析（多模态模型）
 # ──────────────────────────────────────────────
 
-async def parse_image_timetable(image_bytes: bytes, mime_type: str = "image/jpeg") -> dict[str, Any]:
+
+async def parse_image_timetable(
+    image_bytes: bytes, mime_type: str = "image/jpeg"
+) -> dict[str, Any]:
     """
-    使用 Gemini Vision 识别图片课表，返回结构化数据。
+    使用 OpenAI 兼容协议的多模态模型识别图片课表，返回结构化数据。
 
     参数：
         image_bytes: 图片二进制数据
@@ -97,23 +101,23 @@ async def parse_image_timetable(image_bytes: bytes, mime_type: str = "image/jpeg
     返回：
         同 parse_xlsx_timetable 的格式
     """
+    import base64
     import os
 
-    try:
-        from google import genai
-        from google.genai import types
-    except ImportError:
-        raise ImportError("需要安装 google-genai：pip install google-genai")
+    from openai import AsyncOpenAI
 
-    api_key = os.environ.get("GEMINI_API_KEY", "")
-    base_url = os.environ.get("GEMINI_BASE_URL", "")
-    model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+    api_key = os.environ.get("API_KEY", "")
+    if not api_key:
+        raise RuntimeError("环境变量 API_KEY 未设置，请在 .env 中配置 API Key。")
+    model = os.environ.get("CHAT_MODEL", "")
+    if not model:
+        raise RuntimeError("环境变量 CHAT_MODEL 未设置，请在 .env 中配置模型名。")
 
     client_kwargs: dict[str, Any] = {"api_key": api_key}
+    base_url = os.environ.get("BASE_URL", "")
     if base_url:
-        client_kwargs["http_options"] = types.HttpOptions(base_url=base_url)
-
-    client = genai.Client(**client_kwargs)
+        client_kwargs["base_url"] = base_url
+    client = AsyncOpenAI(**client_kwargs)
 
     # 构建多模态请求
     prompt = (
@@ -130,22 +134,33 @@ async def parse_image_timetable(image_bytes: bytes, mime_type: str = "image/jpeg
         "只返回 JSON 对象，不要其他文字。空白和自习格不要放入 busy。"
     )
 
-    image_part = types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
-
-    response = await client.aio.models.generate_content(
+    image_data = base64.b64encode(image_bytes).decode("ascii")
+    response = await client.chat.completions.create(
         model=model,
-        contents=[image_part, prompt],
-        config=types.GenerateContentConfig(
-            temperature=0.1,
-            response_mime_type="application/json",
-        ),
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{mime_type};base64,{image_data}",
+                        },
+                    },
+                ],
+            }
+        ],
+        temperature=0.1,
+        max_tokens=4000,
     )
 
-    text = response.text or ""
+    text = response.choices[0].message.content or ""
 
     # 清理 JSON
     import re
-    md_match = re.search(r'```(?:json)?\s*\n?(.*?)```', text, re.DOTALL)
+
+    md_match = re.search(r"```(?:json)?\s*\n?(.*?)```", text, re.DOTALL)
     if md_match:
         text = md_match.group(1).strip()
 
@@ -157,6 +172,7 @@ async def parse_image_timetable(image_bytes: bytes, mime_type: str = "image/jpeg
 # ──────────────────────────────────────────────
 # 空闲时段提取
 # ──────────────────────────────────────────────
+
 
 def format_busy_desc(timetable: dict[str, Any]) -> str:
     """
